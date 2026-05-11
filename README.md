@@ -1,0 +1,101 @@
+# PA-MA-LLM: Physics-Aware Multi-Agent LLM Framework for Low-Carbon Parks
+
+Reference implementation for the case study of *"A Multi-Agent LLM Framework
+for Behavior Modeling of Low-Carbon Parks in Coupled Electricity-Carbon
+Markets."* The framework couples a dual-layer multi-agent LLM decision process
+with a physics-aware projection layer for park-level scheduling and inter-park
+electricity-carbon bidding.
+
+## Repository layout
+
+```
+.
+├── data/             # Weekly low-carbon scenario factory and profiles
+├── methods/          # Baselines, LLM orchestrators, simulator, projection
+│   ├── case1.py      # Single-park internal dispatch (B1–B5)
+│   ├── case2.py      # Multi-park bidding and carbon-credit settlement
+│   ├── common.py     # Shared dataclasses, ESS dynamics, allocator, metrics
+│   └── llm_agents.py # DeepSeek JSON client and multi-agent orchestrators
+├── scenario/         # Legacy day-ahead scenario builder (kept for reference)
+├── utils/            # IO, math, and project-wide constants
+├── visualization/    # Figure renderers for the manuscript
+├── build_scenario.py        # One-shot weekly scenario export
+├── main.py                  # CLI entrypoint (Case I / Case II / scenario)
+├── run_case1_experiment.py  # Case I runner
+├── run_case1_ablation.py    # Case I ablations (A1–A5)
+├── run_case2_experiment.py  # Case II runner
+├── ablation_plan.py         # Ablation matrix definitions
+└── render_visualizations.py # Re-render figures from saved outputs
+```
+
+## Setup
+
+```bash
+git clone https://github.com/NZY0720/PA-MA-LLM.git
+cd PA-MA-LLM
+pip install -r requirements.txt
+```
+
+### Provide the DeepSeek API key
+
+Either set an environment variable (recommended):
+
+```bash
+export DEEPSEEK_API_KEY="sk-..."        # Linux / macOS
+$env:DEEPSEEK_API_KEY="sk-..."          # PowerShell
+```
+
+…or place the key in a `key.txt` file at the repository root:
+
+```bash
+echo "sk-..." > key.txt   # do not commit this file (already in .gitignore)
+```
+
+If you want to run without any API calls, pass `--mock-llm` to the runners; the
+orchestrators fall back to deterministic rule-based intent generators.
+
+## Reproducing the case studies
+
+Generate the shared weekly scenario:
+
+```bash
+python build_scenario.py
+```
+
+Case I (single low-carbon park, 168 h horizon, B1–B5 baselines + A1–A5
+ablations):
+
+```bash
+python run_case1_experiment.py --repeats 3
+python run_case1_ablation.py   --repeats 3
+```
+
+Case II (five heterogeneous parks, multi-round bidding, carbon-credit
+settlement):
+
+```bash
+python run_case2_experiment.py --repeats 3
+```
+
+Use `--mock-llm` for a deterministic, API-free dry run. Tables and figures are
+written to `outputs/case1/` and `outputs/case2/`.
+
+## Method summary
+
+* **Heterogeneity profile construction** — multi-source evidence is aligned to
+  a schema and turned into a structured profile that conditions every LLM
+  call.
+* **Dual-layer multi-agent decision process** — a lower intra-park layer
+  coordinates PV / ESS / EV / flexible loads; an upper park-market layer
+  forms bids and asks based on the realized flexibility summary and public
+  order-book feedback.
+* **Physics-aware behavior realization** — LLM-generated intentions are
+  projected onto an admissible set defined by device, network, and
+  carbon-accounting constraints; ESS carbon content is tracked over time.
+* **Coupled clearing** — electricity trades are matched by a double-auction
+  rule, then settled through a lightweight carbon-allowance market.
+
+## License
+
+Released for academic and research use. Please cite the manuscript if you build
+on this codebase.

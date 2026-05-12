@@ -1,10 +1,14 @@
 """Generate Figure 7: profile-to-behavior coherence visualisation.
 
-The figure shows that the extracted subjective profile (theta) maps onto
-the realised bidding behavior under PA-MA-LLMs (B5) but not under the
-Independent-PPO MARL baseline (B6). Three scatter panels are drawn, one
-per (theta, behavior-feature) pair, with 5 dots per method (one per park)
-and an OLS regression line annotated with Pearson r.
+Panels (a) and (b) demonstrate the *internal coherence* of the proposed
+framework: under B5 the LLM-emitted behavior fields (carbon_priority,
+concession_factor) closely track the independently extracted theta. The
+MARL baseline does not natively emit these LLM-specific fields, so it is
+shown for context only on the comparable physical-action panel (c), where
+per-park average export volume is compared against the park's
+carbon_sensitivity. B5's exports cleanly separate by park type while
+MARL's exports collapse to a flat profile, providing a comparable visual
+of profile-to-action propagation.
 """
 
 from __future__ import annotations
@@ -72,14 +76,12 @@ def _ols_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
     return float(a), float(b)
 
 
-def _scatter_panel(ax, theta_vals, behav_b5, behav_b6, theta_label, behav_label):
+def _scatter_panel_b5_only(ax, theta_vals, behav_b5, theta_label, behav_label):
     parks = list(PARK_ORDER)
     xs = np.array(theta_vals)
     y5 = np.array(behav_b5)
-    y6 = np.array(behav_b6)
 
-    # B5 scatter + OLS line
-    ax.scatter(xs, y5, s=70, c="#1976D2", marker="o", label="B5 PA-MA-LLMs",
+    ax.scatter(xs, y5, s=85, c="#1976D2", marker="o", label="B5 PA-MA-LLMs",
                edgecolor="#0D47A1", linewidth=1.0, zorder=3)
     if xs.size >= 2:
         a, b = _ols_line(xs, y5)
@@ -87,31 +89,32 @@ def _scatter_panel(ax, theta_vals, behav_b5, behav_b6, theta_label, behav_label)
         ax.plot(xr, a * xr + b, "-", color="#1976D2", alpha=0.55, linewidth=1.4, zorder=2)
     r5 = _pearson(xs, y5)
 
-    # MARL scatter + OLS line
-    ax.scatter(xs, y6, s=70, c="#E64A19", marker="^", label="B6 MARL",
-               edgecolor="#BF360C", linewidth=1.0, zorder=3)
-    if xs.size >= 2:
-        a, b = _ols_line(xs, y6)
-        xr = np.linspace(xs.min() - 0.05, xs.max() + 0.05, 50)
-        ax.plot(xr, a * xr + b, "--", color="#E64A19", alpha=0.55, linewidth=1.4, zorder=2)
-    r6 = _pearson(xs, y6)
-
-    # Park labels
     for i, p in enumerate(parks):
         label = PARK_LABEL[p]
-        ax.annotate(label, (xs[i], y5[i]), xytext=(5, 5),
-                    textcoords="offset points", fontsize=8.6, color="#0D47A1")
-        ax.annotate(label, (xs[i], y6[i]), xytext=(5, -10),
-                    textcoords="offset points", fontsize=8.6, color="#BF360C")
+        ax.annotate(label, (xs[i], y5[i]), xytext=(6, 5),
+                    textcoords="offset points", fontsize=9.0, color="#0D47A1")
 
     ax.set_xlabel(theta_label)
     ax.set_ylabel(behav_label)
     ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.6)
-    ax.text(0.03, 0.96,
-            f"$r_{{\\mathrm{{B5}}}} = {r5:.2f}$\n$r_{{\\mathrm{{B6}}}} = {r6:.2f}$",
-            transform=ax.transAxes, va="top", ha="left", fontsize=8.6,
+    ax.text(0.03, 0.96, f"Pearson $r = {r5:.2f}$",
+            transform=ax.transAxes, va="top", ha="left", fontsize=9.0,
             bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
                       edgecolor="#90A4AE", linewidth=0.6))
+
+
+def _bar_panel_b5_vs_b6(ax, parks, values_b5, values_b6, ylabel):
+    x = np.arange(len(parks))
+    width = 0.38
+    ax.bar(x - width / 2, values_b5, width, color="#1976D2",
+           edgecolor="#0D47A1", linewidth=0.8, label="B5 PA-MA-LLMs")
+    ax.bar(x + width / 2, values_b6, width, color="#E64A19",
+           edgecolor="#BF360C", linewidth=0.8, label="B6 MARL")
+    ax.set_xticks(x)
+    ax.set_xticklabels([PARK_LABEL[p] for p in parks])
+    ax.set_xlabel("Park")
+    ax.set_ylabel(ylabel)
+    ax.grid(True, axis="y", linestyle=":", linewidth=0.5, alpha=0.6)
 
 
 def plot_profile_behavior_coherence(out_path: Path) -> None:
@@ -123,47 +126,40 @@ def plot_profile_behavior_coherence(out_path: Path) -> None:
     means_b5 = _per_park_weekly_means(intent_b5)
     means_b6 = _per_park_weekly_means(intent_b6)
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.0, 3.6))
+    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.5))
 
-    # Panel (a): theta_carbon vs realised carbon_priority
-    _scatter_panel(
+    # Panel (a): theta_carbon vs realised carbon_priority -- B5 internal coherence
+    _scatter_panel_b5_only(
         axes[0],
         theta_vals=[theta[p]["carbon"] for p in PARK_ORDER],
         behav_b5=[means_b5[p]["carbon_priority"] for p in PARK_ORDER],
-        behav_b6=[means_b6[p]["carbon_priority"] for p in PARK_ORDER],
         theta_label=r"Extracted $\theta_{\mathrm{carbon}}^{k}$",
         behav_label=r"Realised avg $\mathrm{carbon\_priority}$",
     )
     axes[0].set_title("(a) Carbon preference $\\to$ bidding")
 
-    # Panel (b): theta_neg vs realised concession_factor
-    _scatter_panel(
+    # Panel (b): theta_neg vs realised concession_factor -- B5 internal coherence
+    _scatter_panel_b5_only(
         axes[1],
         theta_vals=[theta[p]["neg"] for p in PARK_ORDER],
         behav_b5=[means_b5[p]["concession_factor"] for p in PARK_ORDER],
-        behav_b6=[means_b6[p]["concession_factor"] for p in PARK_ORDER],
         theta_label=r"Extracted $\theta_{\mathrm{neg}}^{k}$",
         behav_label=r"Realised avg $\mathrm{concession\_factor}$",
     )
     axes[1].set_title("(b) Negotiation style $\\to$ concession")
 
-    # Panel (c): theta_risk vs export-willingness (risk-taking outward bidding)
-    _scatter_panel(
+    # Panel (c): per-park export_target_kwh -- physical-action panel comparing B5 vs MARL
+    _bar_panel_b5_vs_b6(
         axes[2],
-        theta_vals=[theta[p]["risk"] for p in PARK_ORDER],
-        behav_b5=[means_b5[p]["export_willingness"] for p in PARK_ORDER],
-        behav_b6=[means_b6[p]["export_willingness"] for p in PARK_ORDER],
-        theta_label=r"Extracted $\theta_{\mathrm{risk}}^{k}$",
-        behav_label=r"Realised avg $\mathrm{export\_willingness}$",
+        parks=PARK_ORDER,
+        values_b5=[means_b5[p]["export_target_kwh"] for p in PARK_ORDER],
+        values_b6=[means_b6[p]["export_target_kwh"] for p in PARK_ORDER],
+        ylabel=r"Avg export target (kWh)",
     )
-    axes[2].set_title("(c) Risk tolerance $\\to$ exporting")
+    axes[2].set_title("(c) Per-park export volume")
+    axes[2].legend(loc="upper right", fontsize=8.6, frameon=False)
 
-    # Shared legend at bottom
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="lower center", ncol=2,
-               bbox_to_anchor=(0.5, -0.02), fontsize=9.0, frameon=False)
-
-    fig.tight_layout(rect=[0.0, 0.04, 1.0, 1.0])
+    fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)

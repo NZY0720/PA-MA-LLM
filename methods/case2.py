@@ -58,6 +58,8 @@ class ParkState:
     scenario: dict[str, Any]
     internal_run: Any
     arrays: dict[str, np.ndarray]
+    subjective_profile: dict[str, float] | None = None
+    profile_rationales: dict[str, str] | None = None
 
 
 def _carbon_market_price(states: dict[str, ParkState], total_surplus: float, total_deficit: float) -> float:
@@ -204,6 +206,21 @@ def _build_park_states() -> dict[str, ParkState]:
         )
         states[spec.park_id] = ParkState(spec=spec, scenario=scenario, internal_run=internal_run, arrays=base_arrays(scenario))
     return states
+
+
+def _attach_subjective_profiles(states: dict[str, ParkState], client: Any | None, use_mock: bool) -> None:
+    """Run the evidence-grounded profile extraction pipeline once per park.
+
+    Implements equations (6)-(8) of the manuscript: retrieve TopK evidence
+    chunks from the park's corpus and call a schema-aligned LLM extractor
+    to obtain six subjective preference scores (theta) with rationales.
+    Results are cached to disk so repeats do not re-pay the API cost.
+    """
+    from methods.profile_extraction import load_or_extract_profile, profile_signature
+    for park_id, state in states.items():
+        profile = load_or_extract_profile(park_id, state.spec.park_type, client, use_mock=use_mock)
+        state.subjective_profile = profile_signature(profile)
+        state.profile_rationales = {dim: payload.rationale for dim, payload in profile.items()}
 
 
 @lru_cache(maxsize=1)
@@ -404,6 +421,7 @@ def _double_auction_candidates(
     buyer_remaining: dict[str, float],
     link_caps: dict[tuple[str, str], float],
     physics_projection: bool,
+    box_clipping: bool = False,
 ) -> list[dict[str, Any]]:
     sellers = [dict(order) for order in order_book.get("sell_orders", [])]
     buyers = [dict(order) for order in order_book.get("buy_orders", [])]
@@ -430,7 +448,7 @@ def _double_auction_candidates(
         bid = float(buyer_order["bid_price_rmb_per_kwh"])
         if bid + 1e-9 < ask:
             break
-        max_link = link_caps[(seller, buyer)] if physics_projection else link_caps[(seller, buyer)] * 1.35
+        max_link = link_caps[(seller, buyer)] if (physics_projection or box_clipping) else link_caps[(seller, buyer)] * 1.35
         volume = min(
             float(seller_order["quantity_kwh"]),
             float(buyer_order["quantity_kwh"]),
@@ -511,7 +529,12 @@ def _llm_trace_matches_states(llm_intent: dict[str, Any], park_ids: set[str]) ->
     return True
 
 
-def _run_llm_trading(states: dict[str, ParkState], llm_intent: dict[str, Any], physics_projection: bool) -> dict[str, Any]:
+def _run_llm_trading(
+    states: dict[str, ParkState],
+    llm_intent: dict[str, Any],
+    physics_projection: bool,
+    box_clipping: bool = False,
+) -> dict[str, Any]:
     external = {park_id: _base_external_arrays(state) for park_id, state in states.items()}
     link_caps = _link_capacities()
     horizon = len(next(iter(external.values()))["buy"])
@@ -556,6 +579,11 @@ def _run_llm_trading(states: dict[str, ParkState], llm_intent: dict[str, Any], p
                     export_cap = base_sell + _compute_export_headroom(state, hour, park_output)
                     import_cap = base_buy
                     export_headroom[park_id][hour] = max(export_headroom[park_id][hour], max(export_cap - base_sell, 0.0))
+                elif box_clipping:
+                    # Each park's order is clipped to its individual feasible volume
+                    # (no inflation, no inter-period headroom search); link caps stay strict.
+                    export_cap = base_sell
+                    import_cap = base_buy
                 else:
                     export_cap = max(
                         base_sell,
@@ -585,6 +613,7 @@ def _run_llm_trading(states: dict[str, ParkState], llm_intent: dict[str, Any], p
                 buyer_remaining=buyer_remaining,
                 link_caps=link_caps,
                 physics_projection=physics_projection,
+                box_clipping=box_clipping,
             )
             for item in round_candidates:
                 seller = item["seller"]
@@ -667,7 +696,8 @@ def _run_llm_trading(states: dict[str, ParkState], llm_intent: dict[str, Any], p
     }
 
 
-def _evaluate_case2(name: str, run_id: str, states: dict[str, ParkState], trading_result: dict[str, Any], baseline_no_trade: dict[str, float], model_name: str, llm_intent: dict[str, Any] | None, physics_projection: bool) -> Case2Run:
+def _evaluate_case2(name: str, run_id: str, states: dict[str, ParkState], trading_result: dict[str, Any], baseline_no_trade: dict[str, float], model_name: str, llm_intent: dict[str, Any] | None, physics_projection: bool, box_clipping: bool = False) -> Case2Run:
+    enforce_clip = physics_projection or box_clipping
     trade = trading_result["trade"]
     price_book = trading_result["price_book"]
     link_caps = _link_capacities()
@@ -736,7 +766,7 @@ def _evaluate_case2(name: str, run_id: str, states: dict[str, ParkState], tradin
             trade_carbon_add[buyer] += non_renewable_part * trade_intensity
             trade_payment_out[buyer] += volume * price + volume * TRADE_TRANSACTION_FEE / 2.0
             trade_payment_in[seller] += volume * price - volume * TRADE_TRANSACTION_FEE / 2.0
-            if volume > link_caps[(seller, buyer)] + 1e-9 and not physics_projection:
+            if volume > link_caps[(seller, buyer)] + 1e-9 and not enforce_clip:
                 total_violations += 1
                 total_balance_error += volume - link_caps[(seller, buyer)]
 
@@ -744,14 +774,14 @@ def _evaluate_case2(name: str, run_id: str, states: dict[str, ParkState], tradin
             base_buy = float(external[park_id]["buy"][hour])
             base_sell = float(external[park_id]["sell"][hour])
             allowed_export = base_sell + float(export_headroom.get(park_id, [0.0] * horizon)[hour])
-            if exports_by_park[park_id] > allowed_export + 1e-9 and not physics_projection:
+            if exports_by_park[park_id] > allowed_export + 1e-9 and not enforce_clip:
                 total_violations += 1
                 total_balance_error += exports_by_park[park_id] - allowed_export
-            if imports_by_park[park_id] > base_buy + 1e-9 and not physics_projection:
+            if imports_by_park[park_id] > base_buy + 1e-9 and not enforce_clip:
                 total_violations += 1
                 total_balance_error += imports_by_park[park_id] - base_buy
 
-            if physics_projection:
+            if enforce_clip:
                 per_park_hourly_buy[park_id][hour] = max(base_buy - imports_by_park[park_id], 0.0)
                 per_park_hourly_sell[park_id][hour] = max(base_sell - exports_by_park[park_id], 0.0)
                 park_coordination_cost[park_id] += 0.040 * max(exports_by_park[park_id] - base_sell, 0.0)
@@ -914,7 +944,7 @@ def _save_case2_summary(aggregated: list[dict[str, Any]], reference_run: Case2Ru
                 f"- `B5` carbon credit trading volume: {metrics['B5_Proposed_PI_MA_LLMs']['carbon_credit_trading_volume']['mean']:.3f} kg",
                 f"- `B5` carbon compliance cost: {metrics['B5_Proposed_PI_MA_LLMs']['total_carbon_compliance_cost']['mean']:.3f} RMB",
                 f"- `B5` grid dependence reduction: {metrics['B5_Proposed_PI_MA_LLMs']['grid_dependence_reduction']['mean']:.4f}",
-                f"- `B4` violation rate: {metrics['B4_LLM_Bidding_wo_Physics']['constraint_violation_rate']['mean']:.4f}",
+                f"- `B4` violation rate: {metrics['B4_LLM_Bidding_Box_Clipping']['constraint_violation_rate']['mean']:.4f}",
                 f"- `B5` carbon fairness: {metrics['B5_Proposed_PI_MA_LLMs']['carbon_responsibility_fairness']['mean']:.4f}",
                 "",
                 "## Reference B5 run",
@@ -1150,6 +1180,7 @@ def run_case2(repeats: int = 3, model: str = DEFAULT_MODEL, use_mock_llm: bool =
     states = _build_park_states()
     api_key = None if use_mock_llm else read_api_key(KEY_PATH)
     orchestrator = Case2MultiAgentOrchestrator(model=model, use_mock_llm=use_mock_llm, api_key=api_key)
+    _attach_subjective_profiles(states, client=orchestrator.client, use_mock=use_mock_llm)
 
     baseline_no_trade_cost = 0.0
     baseline_no_trade_emission = 0.0
@@ -1214,18 +1245,53 @@ def run_case2(repeats: int = 3, model: str = DEFAULT_MODEL, use_mock_llm: bool =
                 },
             }
         )
-        b4_runs.append(_evaluate_case2("B4_LLM_Bidding_wo_Physics", f"b4_{idx}", states, _run_llm_trading(states, llm_intent, physics_projection=False), baseline_reference, model if not use_mock_llm else "mock_llm", llm_intent, False))
+        b4_runs.append(_evaluate_case2("B4_LLM_Bidding_Box_Clipping", f"b4_{idx}", states, _run_llm_trading(states, llm_intent, physics_projection=False, box_clipping=True), baseline_reference, model if not use_mock_llm else "mock_llm", llm_intent, physics_projection=False, box_clipping=True))
         b5_runs.append(_evaluate_case2("B5_Proposed_PI_MA_LLMs", f"b5_{idx}", states, _run_llm_trading(states, llm_intent, physics_projection=True), baseline_reference, model if not use_mock_llm else "mock_llm", llm_intent, True))
+
+    # B6: Independent PPO MARL baseline. Each park has its own linear policy
+    # trained on the same scenario; trained intents are then cleared through
+    # the same physics-aware projection used by B5 for an apples-to-apples
+    # comparison.
+    from methods.marl import MARLConfig, rollout_to_intent, train_independent_ppo
+    b6_runs: list[Case2Run] = []
+    marl_intents: list[dict[str, Any]] = []
+    for idx in range(1, repeats + 1):
+        marl_cfg = MARLConfig(seed=20260512 + idx)
+        marl_policies = train_independent_ppo(states, marl_cfg)
+        marl_intent = rollout_to_intent(marl_policies, states)
+        marl_intents.append(marl_intent)
+        write_json(LLM_DIR / f"marl_run_{idx}.json", marl_intent)
+        b6_runs.append(
+            _evaluate_case2(
+                "B6_Independent_PPO_MARL",
+                f"b6_{idx}",
+                states,
+                _run_llm_trading(states, marl_intent, physics_projection=True),
+                baseline_reference,
+                "independent_ppo",
+                marl_intent,
+                True,
+            )
+        )
 
     aggregated = [
         aggregate_case2_runs("B1_No_InterPark_Trading", [b1]),
         aggregate_case2_runs("B2_Rule_Based_InterPark_Trading", [b2]),
         aggregate_case2_runs("B3_Traditional_Game_Based_Method", [b3]),
-        aggregate_case2_runs("B4_LLM_Bidding_wo_Physics", b4_runs),
+        aggregate_case2_runs("B4_LLM_Bidding_Box_Clipping", b4_runs),
+        aggregate_case2_runs("B6_Independent_PPO_MARL", b6_runs),
         aggregate_case2_runs("B5_Proposed_PI_MA_LLMs", b5_runs),
     ]
     reference_run = select_reference_case2_run(b5_runs)
     ablation_results = _case2_ablation_runs(states, baseline_reference, llm_intents, model if not use_mock_llm else "mock_llm")
+
+    # Behavior-fidelity metrics for methods that produce a bidding intent.
+    from methods.behavior_metrics import compute_behavior_fidelity
+    behavior_fidelity = {
+        "B4_LLM_Bidding_Box_Clipping": compute_behavior_fidelity(states, llm_intents[0]).as_dict() if llm_intents else None,
+        "B5_Proposed_PI_MA_LLMs": compute_behavior_fidelity(states, llm_intents[0]).as_dict() if llm_intents else None,
+        "B6_Independent_PPO_MARL": compute_behavior_fidelity(states, marl_intents[0]).as_dict() if marl_intents else None,
+    }
 
     _save_case2_tables(states, aggregated)
     _save_case2_ablation_table(ablation_results)
@@ -1233,6 +1299,18 @@ def run_case2(repeats: int = 3, model: str = DEFAULT_MODEL, use_mock_llm: bool =
     plot_case2_negotiation(aggregated, reference_run, FIGURE_DIR)
     _save_case2_summary(aggregated, reference_run)
     _save_case2_behavior_summary(reference_run)
+    write_json(CASE2_OUTPUT_DIR / "case2_behavior_fidelity.json", behavior_fidelity)
+
+    # Also dump the extracted subjective profiles for the manuscript table.
+    profile_export = {
+        park_id: {
+            "park_type": state.spec.park_type,
+            "subjective_profile": state.subjective_profile or {},
+            "profile_rationales": state.profile_rationales or {},
+        }
+        for park_id, state in states.items()
+    }
+    write_json(CASE2_OUTPUT_DIR / "case2_subjective_profiles.json", profile_export)
 
     payload = {
         "case": "5.2 Case II: Multi-Round Bidding and Trading Among Multiple Low-Carbon Parks",
@@ -1240,6 +1318,8 @@ def run_case2(repeats: int = 3, model: str = DEFAULT_MODEL, use_mock_llm: bool =
         "parks": {park_id: state.scenario for park_id, state in states.items()},
         "aggregated_results": aggregated,
         "ablation_results": ablation_results,
+        "behavior_fidelity": behavior_fidelity,
+        "subjective_profiles": profile_export,
         "reference_b5_run": reference_run.__dict__,
         "llm_intents": llm_records,
     }

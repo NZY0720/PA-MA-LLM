@@ -303,7 +303,10 @@ def simulate_internal_plan(
     plan: dict[str, np.ndarray],
     llm_intent: dict[str, Any] | None,
     physics_projection: bool,
+    box_clipping: bool = False,
 ) -> BaselineRun:
+    enforce_device_clip = physics_projection or box_clipping
+    enforce_state_clip = physics_projection
     arrays = base_arrays(scenario)
     config = scenario["config"]
     horizon = len(arrays["hours"])
@@ -332,7 +335,7 @@ def simulate_internal_plan(
     soc_violation_count = 0
     in_window = (arrays["hour_of_day"] >= ev_arrival) & (arrays["hour_of_day"] <= ev_departure)
 
-    if not physics_projection:
+    if not enforce_device_clip:
         violations += int(np.count_nonzero(hvac < 0.0) + np.count_nonzero(hvac > hvac_peak))
         violations += int(np.count_nonzero(service < 0.0) + np.count_nonzero(service > service_peak))
         violations += int(np.count_nonzero(ev[~in_window] > 1e-6))
@@ -371,19 +374,19 @@ def simulate_internal_plan(
 
     for t in range(horizon):
         candidate_ess = float(ess[t])
-        if abs(candidate_ess) > ess_power_limit + 1e-9 and not physics_projection:
+        if abs(candidate_ess) > ess_power_limit + 1e-9 and not enforce_device_clip:
             violations += 1
 
         candidate_grid = float(load_total[t] - arrays["pv"][t] - candidate_ess)
-        candidate_balance_error[t] = abs(candidate_grid) if not physics_projection else 0.0
-        if abs(candidate_grid) > tie_line_limit + 1e-9 and not physics_projection:
+        candidate_balance_error[t] = abs(candidate_grid) if not enforce_device_clip else 0.0
+        if abs(candidate_grid) > tie_line_limit + 1e-9 and not enforce_device_clip:
             violations += 1
 
-        actual_ess = clamp(candidate_ess, -ess_power_limit, ess_power_limit) if physics_projection else candidate_ess
+        actual_ess = clamp(candidate_ess, -ess_power_limit, ess_power_limit) if enforce_device_clip else candidate_ess
         if actual_ess >= 0.0:
             max_discharge = max(0.0, (ess_energy - ess_energy_min) * ESS_DIS_EFF)
             if actual_ess > max_discharge + 1e-9:
-                if physics_projection:
+                if enforce_state_clip:
                     actual_ess = max_discharge
                 else:
                     soc_violation_count += 1
@@ -392,7 +395,7 @@ def simulate_internal_plan(
         else:
             max_charge = max(0.0, (ess_energy_capacity - ess_energy) / ESS_CH_EFF)
             if -actual_ess > max_charge + 1e-9:
-                if physics_projection:
+                if enforce_state_clip:
                     actual_ess = -max_charge
                 else:
                     soc_violation_count += 1
@@ -400,7 +403,7 @@ def simulate_internal_plan(
             ess_energy_after = ess_energy + (-actual_ess) * ESS_CH_EFF
 
         if ess_energy_after < ess_energy_min - 1e-9 or ess_energy_after > ess_energy_capacity + 1e-9:
-            if physics_projection:
+            if enforce_state_clip:
                 ess_energy_after = clamp(ess_energy_after, ess_energy_min, ess_energy_capacity)
             else:
                 soc_violation_count += 1
@@ -410,8 +413,8 @@ def simulate_internal_plan(
         buy[t] = max(raw_grid, 0.0)
         sell[t] = max(-raw_grid, 0.0)
         if buy[t] > tie_line_limit + 1e-9 or sell[t] > tie_line_limit + 1e-9:
-            violations += int(not physics_projection)
-        if physics_projection:
+            violations += int(not enforce_device_clip)
+        if enforce_device_clip:
             buy[t] = min(buy[t], tie_line_limit)
             sell[t] = min(sell[t], tie_line_limit)
 
@@ -439,7 +442,7 @@ def simulate_internal_plan(
             charge_intensity = arrays["carbon_intensity"][t] * (grid_to_charge[t] / max(charge_power, 1e-6))
             ess_carbon_content += charge_intensity * charge_power * ESS_CH_EFF
 
-        ess_energy = clamp(ess_energy_after, ess_energy_min, ess_energy_capacity) if physics_projection else ess_energy_after
+        ess_energy = clamp(ess_energy_after, ess_energy_min, ess_energy_capacity) if enforce_state_clip else ess_energy_after
         ess_carbon_avg[t] = ess_carbon_content / max(ess_energy, 1e-6) if ess_energy > 1e-6 else 0.0
         soc_series[t] = ess_energy
 

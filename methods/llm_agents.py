@@ -393,7 +393,12 @@ def _case2_mock_round_park_agent(
     memory: dict[str, Any],
     round_index: int,
     max_rounds: int,
+    subjective_profile: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    profile = subjective_profile or {}
+    theta_carbon = float(profile.get("carbon", 0.5))
+    theta_risk = float(profile.get("risk", 0.5))
+    theta_neg = float(profile.get("neg", 0.5))
     hour = int(hour_context["hour"])
     sell_cap = float(hour_context["base_sell_kw"])
     buy_cap = float(hour_context["base_buy_kw"])
@@ -407,7 +412,8 @@ def _case2_mock_round_park_agent(
         + 0.42 * float(hour_context["carbon_intensity_norm"])
         + 0.12 * carbon_sensitivity
         + 0.10 * max(-carbon_position_norm, 0.0)
-        + 0.08 * float(memory.get("last_projection_gap_kw", 0.0) > 1e-6),
+        + 0.08 * float(memory.get("last_projection_gap_kw", 0.0) > 1e-6)
+        + 0.18 * (theta_carbon - 0.5),
         0.0,
         1.0,
     )
@@ -415,7 +421,13 @@ def _case2_mock_round_park_agent(
     previous_feedback = previous_round.get("order_book_feedback", {}) if previous_round else {}
     gap_pressure = min(float(previous_feedback.get("bid_ask_gap_rmb_per_kwh", 0.0)) / price_spread, 1.0)
     round_pressure = round_index / max(max_rounds, 1)
-    concession = clamp(0.16 + 0.34 * round_pressure + 0.10 * float(previous_round is not None) + 0.12 * gap_pressure, 0.0, 1.0)
+    concession = clamp(
+        0.16 + 0.34 * round_pressure + 0.10 * float(previous_round is not None) + 0.12 * gap_pressure
+        + 0.20 * (theta_neg - 0.5)
+        - 0.10 * (theta_risk - 0.5),
+        0.0,
+        1.0,
+    )
 
     partner_priority = _default_partner_priority(park_id)
     if memory.get("last_counterparty") in partner_priority:
@@ -742,6 +754,7 @@ class Case2MultiAgentOrchestrator:
                         memory=memory[park_id],
                         round_index=round_index,
                         max_rounds=max_rounds,
+                        subjective_profile=getattr(state, "subjective_profile", None),
                     )
                     fallback_outputs[park_id] = fallback
 
@@ -942,6 +955,8 @@ class Case2MultiAgentOrchestrator:
                 "park_id": park_id,
                 "park_type": state.spec.park_type,
                 "carbon_sensitivity": state.spec.carbon_sensitivity,
+                "subjective_profile": getattr(state, "subjective_profile", None) or {},
+                "profile_rationales": getattr(state, "profile_rationales", None) or {},
                 "round_context": {
                     "hour": hour_context["hour"],
                     "round_index": round_index,

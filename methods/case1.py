@@ -490,7 +490,7 @@ def _save_case1_summary(aggregated: list[dict[str, Any]], reference_pi: Baseline
     b1 = metrics_map["B1_Rule_Based_EMS"]
     b2 = metrics_map["B2_Centralized_Optimization"]
     b3 = metrics_map["B3_Single_LLM_Unified_Manager"]
-    b4 = metrics_map["B4_LLM_MAS_wo_Physics"]
+    b4 = metrics_map["B4_LLM_MAS_Box_Clipping"]
     b5 = metrics_map["B5_PA_MA_LLMs"]
     write_markdown(
         CASE1_OUTPUT_DIR / "case1_summary.md",
@@ -561,14 +561,14 @@ def run_case1(repeats: int = 3, model: str = DEFAULT_MODEL, use_mock_llm: bool =
             }
         )
         single_llm_runs.append(simulate_internal_plan("B3_Single_LLM_Unified_Manager", f"single_{idx}", scenario, _build_single_llm_plan(scenario, intent), intent, True))
-        llm_plain_runs.append(simulate_internal_plan("B4_LLM_MAS_wo_Physics", f"llm_{idx}", scenario, _build_raw_llm_plan(scenario, intent), intent, False))
+        llm_plain_runs.append(simulate_internal_plan("B4_LLM_MAS_Box_Clipping", f"llm_{idx}", scenario, _build_raw_llm_plan(scenario, intent), intent, False, box_clipping=True))
         pi_runs.append(simulate_internal_plan("B5_PA_MA_LLMs", f"pa_{idx}", scenario, _build_pi_plan(scenario, intent), intent, True))
 
     aggregated = [
         aggregate_runs("B1_Rule_Based_EMS", [deterministic_runs[0]]),
         aggregate_runs("B2_Centralized_Optimization", [deterministic_runs[1]]),
         aggregate_runs("B3_Single_LLM_Unified_Manager", single_llm_runs),
-        aggregate_runs("B4_LLM_MAS_wo_Physics", llm_plain_runs),
+        aggregate_runs("B4_LLM_MAS_Box_Clipping", llm_plain_runs),
         aggregate_runs("B5_PA_MA_LLMs", pi_runs),
     ]
     reference_pi = select_reference_run(pi_runs)

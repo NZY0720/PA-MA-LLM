@@ -20,6 +20,10 @@ LLM_GENERATION_TEMPERATURE = 0.2
 LLM_REPAIR_TEMPERATURE = 0.0
 MAX_LLM_ATTEMPTS = 3
 
+# Force direct connection: api.deepseek.com is reachable without a proxy, and
+# routing through a local proxy adds ~0.3-0.4s per request (see bench_proxy.py).
+_NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 class DeepSeekJSONClient:
     def __init__(self, model: str, api_key: str):
@@ -77,7 +81,7 @@ class DeepSeekJSONClient:
             headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with _NO_PROXY_OPENER.open(request, timeout=120) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def _repair_json_text(self, raw_text: str) -> dict[str, Any]:
@@ -243,10 +247,10 @@ class Case1MultiAgentOrchestrator:
         intent = {
             "operator_econ_focus": operator_econ,
             "operator_carbon_focus": operator_carbon,
-            "ess_signal": np.clip(ess_signal * clamp(float(reconcile.get("ess_weight", 1.0)), 0.4, 1.6), -1.0, 1.0),
-            "hvac_signal": np.clip(hvac_signal * clamp(float(reconcile.get("hvac_weight", 1.0)), 0.4, 1.6), -1.0, 1.0),
-            "service_signal": np.clip(service_signal * clamp(float(reconcile.get("service_weight", 1.0)), 0.4, 1.6), -1.0, 1.0),
-            "ev_signal": np.clip(ev_signal * clamp(float(reconcile.get("ev_weight", 1.0)), 0.4, 1.6), 0.0, 1.0),
+            "ess_signal": np.clip(ess_signal * clamp(float(reconcile.get("ess_weight") if reconcile.get("ess_weight") is not None else 1.0), 0.4, 1.6), -1.0, 1.0),
+            "hvac_signal": np.clip(hvac_signal * clamp(float(reconcile.get("hvac_weight") if reconcile.get("hvac_weight") is not None else 1.0), 0.4, 1.6), -1.0, 1.0),
+            "service_signal": np.clip(service_signal * clamp(float(reconcile.get("service_weight") if reconcile.get("service_weight") is not None else 1.0), 0.4, 1.6), -1.0, 1.0),
+            "ev_signal": np.clip(ev_signal * clamp(float(reconcile.get("ev_weight") if reconcile.get("ev_weight") is not None else 1.0), 0.4, 1.6), 0.0, 1.0),
             "summary": reconcile.get("summary", operator.get("summary", fallback_operator["summary"])),
             "agent_rationales": {
                 "operator": operator.get("coordination_message", ""),
@@ -646,33 +650,48 @@ def _normalize_bidding_payload(
     raw: dict[str, Any],
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
-    partner_priority = raw.get("partner_priority", fallback["partner_priority"])
+    # dict.get(k, default) does not substitute default when the key is present
+    # with a None value, so LLMs that emit explicit null fields would crash
+    # float()/clamp() downstream. _get coerces None to the fallback.
+    def _get(key: str, default: Any) -> Any:
+        value = raw.get(key, default)
+        return default if value is None else value
+
+    partner_priority = _get("partner_priority", fallback["partner_priority"])
     if not isinstance(partner_priority, dict):
         partner_priority = fallback["partner_priority"]
-    role = str(raw.get("role", fallback["role"]))
+    role = str(_get("role", fallback["role"]))
     if role not in {"seller", "buyer", "balanced", "idle"}:
         role = fallback["role"]
-    carbon_market_posture = str(raw.get("carbon_market_posture", fallback.get("carbon_market_posture", "balanced")))
+    carbon_market_posture = str(_get("carbon_market_posture", fallback.get("carbon_market_posture", "balanced")))
     if carbon_market_posture not in {"credit_seller", "credit_buyer", "balanced"}:
         carbon_market_posture = fallback.get("carbon_market_posture", "balanced")
+
+    def _partner_value(other_id: str, fb_value: float) -> float:
+        v = partner_priority.get(other_id, fb_value)
+        if v is None:
+            v = fb_value
+        return round(float(clamp(float(v), 0.0, 1.0)), 4)
+
+    continue_bidding_raw = _get("continue_bidding", _get("continue_negotiation", fallback["continue_bidding"]))
     return {
         "role": role,
-        "export_willingness": round(float(clamp(float(raw.get("export_willingness", fallback["export_willingness"])), 0.0, 1.0)), 4),
-        "import_willingness": round(float(clamp(float(raw.get("import_willingness", fallback["import_willingness"])), 0.0, 1.0)), 4),
-        "carbon_priority": round(float(clamp(float(raw.get("carbon_priority", fallback["carbon_priority"])), 0.0, 1.0)), 4),
-        "concession_factor": round(float(clamp(float(raw.get("concession_factor", fallback["concession_factor"])), 0.0, 1.0)), 4),
-        "export_target_kwh": round(float(max(float(raw.get("export_target_kwh", fallback["export_target_kwh"])), 0.0)), 4),
-        "import_target_kwh": round(float(max(float(raw.get("import_target_kwh", fallback["import_target_kwh"])), 0.0)), 4),
-        "ask_price_rmb_per_kwh": round(float(max(float(raw.get("ask_price_rmb_per_kwh", fallback["ask_price_rmb_per_kwh"])), 0.0)), 4),
-        "bid_price_rmb_per_kwh": round(float(max(float(raw.get("bid_price_rmb_per_kwh", fallback["bid_price_rmb_per_kwh"])), 0.0)), 4),
+        "export_willingness": round(float(clamp(float(_get("export_willingness", fallback["export_willingness"])), 0.0, 1.0)), 4),
+        "import_willingness": round(float(clamp(float(_get("import_willingness", fallback["import_willingness"])), 0.0, 1.0)), 4),
+        "carbon_priority": round(float(clamp(float(_get("carbon_priority", fallback["carbon_priority"])), 0.0, 1.0)), 4),
+        "concession_factor": round(float(clamp(float(_get("concession_factor", fallback["concession_factor"])), 0.0, 1.0)), 4),
+        "export_target_kwh": round(float(max(float(_get("export_target_kwh", fallback["export_target_kwh"])), 0.0)), 4),
+        "import_target_kwh": round(float(max(float(_get("import_target_kwh", fallback["import_target_kwh"])), 0.0)), 4),
+        "ask_price_rmb_per_kwh": round(float(max(float(_get("ask_price_rmb_per_kwh", fallback["ask_price_rmb_per_kwh"])), 0.0)), 4),
+        "bid_price_rmb_per_kwh": round(float(max(float(_get("bid_price_rmb_per_kwh", fallback["bid_price_rmb_per_kwh"])), 0.0)), 4),
         "carbon_market_posture": carbon_market_posture,
         "partner_priority": {
-            other_id: round(float(clamp(float(partner_priority.get(other_id, value)), 0.0, 1.0)), 4)
+            other_id: _partner_value(other_id, value)
             for other_id, value in fallback["partner_priority"].items()
         },
-        "continue_bidding": bool(raw.get("continue_bidding", raw.get("continue_negotiation", fallback["continue_bidding"]))),
-        "message": str(raw.get("message", fallback["message"]))[:240],
-        "summary": str(raw.get("summary", fallback["summary"]))[:240],
+        "continue_bidding": bool(continue_bidding_raw),
+        "message": str(_get("message", fallback["message"]))[:240],
+        "summary": str(_get("summary", fallback["summary"]))[:240],
     }
 
 

@@ -185,12 +185,6 @@ def plot_case2_coupled_market_summary(reference_run, out_dir: Path) -> None:
     carbon_market = reference_run.details.get("carbon_market", {})
     positions = np.asarray([float(carbon_market.get("position_kg", {}).get(park_id, 0.0)) for park_id in park_ids], dtype=float)
     net_cost = np.asarray([float(carbon_market.get("net_cost_rmb", {}).get(park_id, 0.0)) for park_id in park_ids], dtype=float)
-    quota = np.asarray([float(carbon_market.get("quota_kg", {}).get(park_id, 0.0)) for park_id in park_ids], dtype=float)
-    emissions = np.asarray([float(reference_run.park_emissions.get(park_id, 0.0)) for park_id in park_ids], dtype=float)
-    external_credit = np.asarray(
-        [float(carbon_market.get("external_credit_purchase_kg", {}).get(park_id, 0.0)) for park_id in park_ids],
-        dtype=float,
-    )
 
     fig, axes = plt.subplots(2, 2, figsize=(9.2, 5.9))
 
@@ -244,17 +238,48 @@ def plot_case2_coupled_market_summary(reference_run, out_dir: Path) -> None:
     ax.legend(handles_left + handles_right, labels_left + labels_right, loc="upper left", ncol=2, fontsize=7.3, frameon=True, framealpha=0.82, borderpad=0.25, handlelength=1.4)
 
     ax = axes[1, 1]
-    ax.set_title("(d) Allowance and Emission", pad=8)
-    x = np.arange(len(park_ids))
-    width = 0.26
-    ax.bar(x - width, quota, width, color="#b8d8f0", label="Allowance")
-    ax.bar(x, emissions, width, color="#f4a582", label="Emission")
-    ax.bar(x + width, external_credit, width, color="#8c6bb1", label="External credit")
-    ax.set_xticks(x)
-    ax.set_xticklabels(short_labels)
-    ax.set_ylabel("kg")
+    ax.set_title("(d) P2P Clearing Price Corridor", pad=8)
+    horizon = len(reference_run.details.get("rounds_per_hour", []))
+    hours_axis = np.arange(horizon)
+    buy_price = np.asarray(reference_run.details.get("buy_price_rmb_per_kwh", []), dtype=float)
+    sell_price = np.asarray(reference_run.details.get("sell_price_rmb_per_kwh", []), dtype=float)
+    # Per-hour volume-weighted P2P clearing price across all cleared pairs.
+    clearing_price = np.full(horizon, np.nan, dtype=float)
+    clearing_volume = np.zeros(horizon, dtype=float)
+    for hour_str, pairs in reference_run.details.get("trade_by_hour", {}).items():
+        h = int(hour_str)
+        if h >= horizon:
+            continue
+        vols = np.array([float(item["volume_kwh"]) for item in pairs.values()])
+        prs = np.array([float(item["price_rmb_per_kwh"]) for item in pairs.values()])
+        total = float(vols.sum())
+        if total > 1e-6:
+            clearing_price[h] = float((vols * prs).sum() / total)
+            clearing_volume[h] = total
+
+    ax.fill_between(hours_axis, sell_price, buy_price, color="#cce5ff", alpha=0.55,
+                    label="Grid arbitrage band")
+    ax.plot(hours_axis, buy_price, color="#2b5c9e", linestyle="--", linewidth=1.0,
+            label="Grid buy price")
+    ax.plot(hours_axis, sell_price, color="#1f5d40", linestyle="--", linewidth=1.0,
+            label="Grid sell price")
+    mask = ~np.isnan(clearing_price)
+    if mask.any():
+        sizes = 6.0 + 0.18 * clearing_volume[mask]
+        ax.scatter(hours_axis[mask], clearing_price[mask],
+                   s=np.clip(sizes, 6.0, 60.0),
+                   color="#d95f02", alpha=0.85,
+                   edgecolor="white", linewidth=0.35,
+                   label="P2P clearing", zorder=3)
+    ax.set_xlabel("Hour")
+    ax.set_ylabel("Price (RMB/kWh)")
+    ax.set_xlim(-1, horizon)
+    day_ticks = np.arange(0, horizon + 1, 24)
+    ax.set_xticks(day_ticks)
+    ax.set_xticklabels([f"D{i // 24 + 1}" if i < horizon else "" for i in day_ticks])
     ax.grid(axis="y", alpha=0.25)
-    ax.legend(loc="upper right", ncol=1, fontsize=7.4, frameon=True, framealpha=0.82, borderpad=0.25, handlelength=1.4)
+    ax.legend(loc="upper right", fontsize=7.0, frameon=True, framealpha=0.82,
+              borderpad=0.25, handlelength=1.6, ncol=2)
 
     for axis in [*axes.flatten(), price_ax, cost_ax, grid_ax]:
         axis.tick_params(labelsize=8.7)

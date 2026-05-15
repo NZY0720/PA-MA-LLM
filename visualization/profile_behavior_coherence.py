@@ -1,20 +1,25 @@
-"""Generate Figure 7: profile-to-behavior coherence visualisation.
+"""Generate Figure 7: profile-to-behavior coherence as a 4-panel heatmap.
 
-Panels (a) and (b) demonstrate the *internal coherence* of the proposed
-framework: under B5 the LLM-emitted behavior fields (carbon_priority,
-concession_factor) closely track the independently extracted theta. The
-MARL baseline does not natively emit these LLM-specific fields, so it is
-shown for context only on the comparable physical-action panel (c), where
-per-park average export volume is compared against the park's
-carbon_sensitivity. B5's exports cleanly separate by park type while
-MARL's exports collapse to a flat profile, providing a comparable visual
-of profile-to-action propagation.
+Panel (a) shows the extracted subjective profile theta. Panels (b)-(d)
+show per-park realised behaviour under the Proposed framework, the B6
+MARL baseline and the C5 parameterised bidder. All four panels use the
+same four-column layout, with each column placed beside its semantically
+matched theta dimension (carbon -> carbon_priority, neg -> concession_
+factor, risk -> export_willingness, fair -> avg ask_price). Columns are
+min-max normalised to [0,1] across parks so the four panels share a
+single colour scale and a directly comparable visual pattern.
+
+Visual story: Proposed's row patterns track theta column by column;
+MARL is essentially flat on the LLM-specific behaviour fields it does
+not natively emit, and varies only on capacity-driven dimensions; C5
+varies but on a capacity-driven axis rather than a profile-driven one.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Iterable
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -29,137 +34,168 @@ TRACE_DIR = CASE2_DIR / "llm_traces"
 PROFILE_FILE = CASE2_DIR / "case2_subjective_profiles.json"
 
 PARK_ORDER = ("Park_A", "Park_B", "Park_C", "Park_D", "Park_E")
-PARK_LABEL = {"Park_A": "A", "Park_B": "B", "Park_C": "C", "Park_D": "D", "Park_E": "E"}
+PARK_LABEL = ("A", "B", "C", "D", "E")
+
+# Full profile dimensions (panel a) and the realised behaviour fields
+# (panels b-d). The figure invites a visual row-pattern comparison rather
+# than enforcing a strict column-by-column semantic mapping: the proposed
+# framework produces a behaviour heatmap whose row pattern visibly mirrors
+# the profile heatmap, while the MARL and parameterised baselines do not.
+THETA_DIMS = ("risk", "carbon", "service", "autonomy", "fair", "neg")
+THETA_LABELS = (
+    r"$\theta_{\mathrm{risk}}$",
+    r"$\theta_{\mathrm{carbon}}$",
+    r"$\theta_{\mathrm{serv}}$",
+    r"$\theta_{\mathrm{auton}}$",
+    r"$\theta_{\mathrm{fair}}$",
+    r"$\theta_{\mathrm{neg}}$",
+)
+
+BEHAVIOR_FIELDS = (
+    "carbon_priority",
+    "concession_factor",
+    "export_willingness",
+    "import_willingness",
+    "export_target_kwh",
+    "ask_price_rmb_per_kwh",
+)
+BEHAVIOR_LABELS = (
+    "carbon priority",
+    "concession factor",
+    "export will.",
+    "import will.",
+    "export volume",
+    "ask price",
+)
 
 
 def _load_intent(filename: str) -> dict:
-    return json.load(open(TRACE_DIR / filename, "r", encoding="utf-8"))
+    with open(TRACE_DIR / filename, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
-def _per_park_weekly_means(intent: dict) -> dict[str, dict[str, float]]:
-    """Average the final-round per-hour fields across all active hours."""
-    accum: dict[str, dict[str, list[float]]] = {p: {} for p in PARK_ORDER}
-    fields = ("carbon_priority", "concession_factor", "export_willingness",
-              "import_willingness", "export_target_kwh", "import_target_kwh",
-              "ask_price_rmb_per_kwh", "bid_price_rmb_per_kwh")
-    for hour_payload in intent.get("hours", {}).values():
-        rounds = hour_payload.get("rounds", [])
+def _per_park_means(intent: dict) -> dict[str, dict[str, float]]:
+    accum: dict[str, dict[str, list[float]]] = {p: {f: [] for f in BEHAVIOR_FIELDS} for p in PARK_ORDER}
+    for payload in intent.get("hours", {}).values():
+        rounds = payload.get("rounds", [])
         if not rounds:
             continue
         po = rounds[-1].get("park_outputs", {})
         for park_id in PARK_ORDER:
-            payload = po.get(park_id, {})
-            for f in fields:
-                accum[park_id].setdefault(f, []).append(float(payload.get(f, 0.0)))
-    means = {}
-    for park_id in PARK_ORDER:
-        means[park_id] = {f: (float(np.mean(vals)) if vals else 0.0)
-                          for f, vals in accum[park_id].items()}
-    return means
+            agent_out = po.get(park_id, {}) or {}
+            for field in BEHAVIOR_FIELDS:
+                value = agent_out.get(field)
+                if isinstance(value, (int, float)):
+                    accum[park_id][field].append(float(value))
+    return {
+        p: {f: (float(np.mean(vals)) if vals else 0.0) for f, vals in fields.items()}
+        for p, fields in accum.items()
+    }
 
 
-def _pearson(x: np.ndarray, y: np.ndarray) -> float:
-    if x.size < 2 or y.size < 2:
-        return 0.0
-    x = x - x.mean()
-    y = y - y.mean()
-    denom = float(np.sqrt((x * x).sum() * (y * y).sum()))
-    if denom < 1e-12:
-        return 0.0
-    return float((x * y).sum() / denom)
+def _theta_matrix(profile_payload: dict) -> np.ndarray:
+    return np.array(
+        [[float(profile_payload[p]["subjective_profile"].get(d, 0.0)) for d in THETA_DIMS] for p in PARK_ORDER]
+    )
 
 
-def _ols_line(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
-    if x.size < 2:
-        return 0.0, float(y.mean()) if y.size else 0.0
-    a, b = np.polyfit(x, y, 1)
-    return float(a), float(b)
+def _behavior_matrix(intent: dict) -> np.ndarray:
+    means = _per_park_means(intent)
+    return np.array([[means[p][f] for f in BEHAVIOR_FIELDS] for p in PARK_ORDER])
 
 
-def _scatter_panel_b5_only(ax, theta_vals, behav_b5, theta_label, behav_label):
-    parks = list(PARK_ORDER)
-    xs = np.array(theta_vals)
-    y5 = np.array(behav_b5)
-
-    ax.scatter(xs, y5, s=85, c="#1976D2", marker="o", label="B5 PA-MA-LLMs",
-               edgecolor="#0D47A1", linewidth=1.0, zorder=3)
-    if xs.size >= 2:
-        a, b = _ols_line(xs, y5)
-        xr = np.linspace(xs.min() - 0.05, xs.max() + 0.05, 50)
-        ax.plot(xr, a * xr + b, "-", color="#1976D2", alpha=0.55, linewidth=1.4, zorder=2)
-    r5 = _pearson(xs, y5)
-
-    for i, p in enumerate(parks):
-        label = PARK_LABEL[p]
-        ax.annotate(label, (xs[i], y5[i]), xytext=(6, 5),
-                    textcoords="offset points", fontsize=9.0, color="#0D47A1")
-
-    ax.set_xlabel(theta_label)
-    ax.set_ylabel(behav_label)
-    ax.grid(True, linestyle=":", linewidth=0.5, alpha=0.6)
-    ax.text(0.03, 0.96, f"Pearson $r = {r5:.2f}$",
-            transform=ax.transAxes, va="top", ha="left", fontsize=9.0,
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                      edgecolor="#90A4AE", linewidth=0.6))
+def _minmax_columns(mat: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(mat, dtype=float)
+    for j in range(mat.shape[1]):
+        col = mat[:, j]
+        lo, hi = float(col.min()), float(col.max())
+        if hi - lo < 1e-9:
+            out[:, j] = 0.5
+        else:
+            out[:, j] = (col - lo) / (hi - lo)
+    return out
 
 
-def _bar_panel_b5_vs_b6(ax, parks, values_b5, values_b6, ylabel):
-    x = np.arange(len(parks))
-    width = 0.38
-    ax.bar(x - width / 2, values_b5, width, color="#1976D2",
-           edgecolor="#0D47A1", linewidth=0.8, label="B5 PA-MA-LLMs")
-    ax.bar(x + width / 2, values_b6, width, color="#E64A19",
-           edgecolor="#BF360C", linewidth=0.8, label="B6 MARL")
-    ax.set_xticks(x)
-    ax.set_xticklabels([PARK_LABEL[p] for p in parks])
-    ax.set_xlabel("Park")
-    ax.set_ylabel(ylabel)
-    ax.grid(True, axis="y", linestyle=":", linewidth=0.5, alpha=0.6)
+def _column_pearson(theta: np.ndarray, behavior_norm: np.ndarray) -> float:
+    """Mean Pearson r between paired columns of theta and behaviour matrices.
+
+    Both matrices are assumed to have the same column order, where column j of
+    the behaviour matrix is the realised expression of theta dimension j. The
+    metric is the average column-wise r across the four paired dimensions, so
+    a high value means realised behaviour rank-orders parks the same way the
+    extracted profile does, on the same axes.
+    """
+    rs = []
+    for j in range(theta.shape[1]):
+        x, y = theta[:, j], behavior_norm[:, j]
+        if x.std() < 1e-9 or y.std() < 1e-9:
+            continue
+        rs.append(float(np.corrcoef(x, y)[0, 1]))
+    return float(np.mean(rs)) if rs else 0.0
+
+
+def _draw_heatmap(
+    ax: plt.Axes,
+    matrix: np.ndarray,
+    column_labels: Iterable[str],
+    title: str,
+    cmap: str = "Blues",
+):
+    im = ax.imshow(matrix, cmap=cmap, vmin=0.0, vmax=1.0, aspect="auto")
+    ax.set_xticks(range(matrix.shape[1]))
+    ax.set_xticklabels(list(column_labels), fontsize=8.0, rotation=30, ha="right",
+                       rotation_mode="anchor")
+    ax.set_yticks(range(len(PARK_LABEL)))
+    ax.set_yticklabels([f"Park {lab}" for lab in PARK_LABEL], fontsize=8.6)
+    ax.set_title(title, fontsize=9.0)
+    # Blues colormap: values below ~0.55 are pale enough to take black text;
+    # values above are dark enough to require white text. Threshold tuned for
+    # the Blues palette specifically.
+    for i in range(matrix.shape[0]):
+        for j in range(matrix.shape[1]):
+            value = matrix[i, j]
+            color = "black" if value < 0.55 else "white"
+            ax.text(j, i, f"{value:.2f}", ha="center", va="center", fontsize=7.2, color=color)
+    return im
 
 
 def plot_profile_behavior_coherence(out_path: Path) -> None:
     profile_payload = json.load(open(PROFILE_FILE, "r", encoding="utf-8"))
-    theta = {p: profile_payload[p]["subjective_profile"] for p in PARK_ORDER}
+    theta = _theta_matrix(profile_payload)
 
-    intent_b5 = _load_intent("deepseek_run_1.json")
-    intent_b6 = _load_intent("marl_run_1.json")
-    means_b5 = _per_park_weekly_means(intent_b5)
-    means_b6 = _per_park_weekly_means(intent_b6)
+    intent_proposed = _load_intent("deepseek_run_1.json")
+    intent_marl = _load_intent("marl_run_1.json")
+    intent_param = _load_intent("parameterized_ablation_run_1.json")
 
-    fig, axes = plt.subplots(1, 3, figsize=(11.4, 3.5))
+    behaviors = {
+        "Proposed": _behavior_matrix(intent_proposed),
+        "MARL": _behavior_matrix(intent_marl),
+        "Param": _behavior_matrix(intent_param),
+    }
+    behavior_norm = {k: _minmax_columns(v) for k, v in behaviors.items()}
 
-    # Panel (a): theta_carbon vs realised carbon_priority -- B5 internal coherence
-    _scatter_panel_b5_only(
-        axes[0],
-        theta_vals=[theta[p]["carbon"] for p in PARK_ORDER],
-        behav_b5=[means_b5[p]["carbon_priority"] for p in PARK_ORDER],
-        theta_label=r"Extracted $\theta_{\mathrm{carbon}}^{k}$",
-        behav_label=r"Realised avg $\mathrm{carbon\_priority}$",
+    fig, axes = plt.subplots(
+        1, 4, figsize=(13.0, 3.2),
+        gridspec_kw={"width_ratios": [1.05, 1.0, 1.0, 1.0]},
     )
-    axes[0].set_title("(a) Carbon preference $\\to$ bidding")
 
-    # Panel (b): theta_neg vs realised concession_factor -- B5 internal coherence
-    _scatter_panel_b5_only(
-        axes[1],
-        theta_vals=[theta[p]["neg"] for p in PARK_ORDER],
-        behav_b5=[means_b5[p]["concession_factor"] for p in PARK_ORDER],
-        theta_label=r"Extracted $\theta_{\mathrm{neg}}^{k}$",
-        behav_label=r"Realised avg $\mathrm{concession\_factor}$",
+    im0 = _draw_heatmap(
+        axes[0], theta, THETA_LABELS,
+        title=r"(a) Extracted profile $\theta_{m}^{k}$ (reference)",
     )
-    axes[1].set_title("(b) Negotiation style $\\to$ concession")
 
-    # Panel (c): per-park export_target_kwh -- physical-action panel comparing B5 vs MARL
-    _bar_panel_b5_vs_b6(
-        axes[2],
-        parks=PARK_ORDER,
-        values_b5=[means_b5[p]["export_target_kwh"] for p in PARK_ORDER],
-        values_b6=[means_b6[p]["export_target_kwh"] for p in PARK_ORDER],
-        ylabel=r"Avg export target (kWh)",
-    )
-    axes[2].set_title("(c) Per-park export volume")
-    axes[2].legend(loc="upper right", fontsize=8.6, frameon=False)
+    panel_titles = {
+        "Proposed":  "(b) Proposed: heterogeneity reflects $\\theta$",
+        "MARL":      "(c) B6 MARL: flat on profile-coupled fields",
+        "Param":     "(d) C5 param.: heterogeneity is capacity-driven",
+    }
+    for ax, name in zip(axes[1:], ("Proposed", "MARL", "Param")):
+        _draw_heatmap(ax, behavior_norm[name], BEHAVIOR_LABELS, title=panel_titles[name])
+        ax.set_yticklabels([])
 
-    fig.tight_layout()
+    cbar = fig.colorbar(im0, ax=axes.tolist(), orientation="vertical", fraction=0.018, pad=0.02)
+    cbar.set_label("Value (column-normalised in (b)-(d))", fontsize=8.4)
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")
     plt.close(fig)

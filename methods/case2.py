@@ -871,6 +871,8 @@ def _evaluate_case2(name: str, run_id: str, states: dict[str, ParkState], tradin
         details={
             "pair_trade_totals_kwh": {f"{seller}->{buyer}": round(volume, 4) for (seller, buyer), volume in bilateral_totals.items() if volume > 1e-6},
             "trade_by_hour": {str(hour): {f"{seller}->{buyer}": {"volume_kwh": volume, "price_rmb_per_kwh": price_book[hour][(seller, buyer)]} for (seller, buyer), volume in trade[hour].items()} for hour in range(horizon) if trade[hour]},
+            "buy_price_rmb_per_kwh": series_payload(np.asarray(next(iter(external.values()))["buy_price"], dtype=float)),
+            "sell_price_rmb_per_kwh": series_payload(np.asarray(next(iter(external.values()))["sell_price"], dtype=float)),
             "park_hourly_grid_buy": {park_id: series_payload(per_park_hourly_buy[park_id]) for park_id in park_ids},
             "park_hourly_grid_sell": {park_id: series_payload(per_park_hourly_sell[park_id]) for park_id in park_ids},
             "carbon_market": carbon_market,

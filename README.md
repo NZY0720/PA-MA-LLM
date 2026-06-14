@@ -91,7 +91,7 @@ written to `outputs/case1/` and `outputs/case2/`.
   order-book feedback.
 * **Physics-aware behavior realization** — LLM-generated intentions are
   projected onto an admissible set defined by device, network, and
-  carbon-accounting constraints; ESS carbon content is tracked over time.
+  carbon accounting constraints; ESS carbon content is tracked over time.
 * **Coupled clearing** — electricity trades are matched by a double-auction
   rule, then settled through a lightweight carbon-allowance market.
 

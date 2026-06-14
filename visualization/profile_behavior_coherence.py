@@ -3,10 +3,9 @@
 Panel (a) shows the extracted subjective profile theta. Panels (b)-(d)
 show per-park realised behaviour under the Proposed framework, the B6
 MARL baseline and the C5 parameterised bidder. All four panels use the
-same four-column layout, with each column placed beside its semantically
-matched theta dimension (carbon -> carbon_priority, neg -> concession_
-factor, risk -> export_willingness, fair -> avg ask_price). Columns are
-min-max normalised to [0,1] across parks so the four panels share a
+same profile-to-behavior layout, with behavior columns selected to reflect
+carbon priority, negotiation, export/import willingness, and target volume.
+Columns are min-max normalized to [0,1] across parks so the four panels share a
 single colour scale and a directly comparable visual pattern.
 
 Visual story: Proposed's row patterns track theta column by column;
@@ -41,13 +40,12 @@ PARK_LABEL = ("A", "B", "C", "D", "E")
 # than enforcing a strict column-by-column semantic mapping: the proposed
 # framework produces a behaviour heatmap whose row pattern visibly mirrors
 # the profile heatmap, while the MARL and parameterised baselines do not.
-THETA_DIMS = ("risk", "carbon", "service", "autonomy", "fair", "neg")
+THETA_DIMS = ("risk", "carbon", "service", "autonomy", "neg")
 THETA_LABELS = (
     r"$\theta_{\mathrm{risk}}$",
     r"$\theta_{\mathrm{carbon}}$",
     r"$\theta_{\mathrm{serv}}$",
     r"$\theta_{\mathrm{auton}}$",
-    r"$\theta_{\mathrm{fair}}$",
     r"$\theta_{\mathrm{neg}}$",
 )
 
@@ -57,7 +55,6 @@ BEHAVIOR_FIELDS = (
     "export_willingness",
     "import_willingness",
     "export_target_kwh",
-    "ask_price_rmb_per_kwh",
 )
 BEHAVIOR_LABELS = (
     "carbon priority",
@@ -65,7 +62,6 @@ BEHAVIOR_LABELS = (
     "export will.",
     "import will.",
     "export volume",
-    "ask price",
 )
 
 
@@ -194,7 +190,7 @@ def plot_profile_behavior_coherence(out_path: Path) -> None:
         ax.set_yticklabels([])
 
     cbar = fig.colorbar(im0, ax=axes.tolist(), orientation="vertical", fraction=0.018, pad=0.02)
-    cbar.set_label("Value (column-normalised in (b)-(d))", fontsize=8.4)
+    cbar.set_label("Value (column-normalized in (b)-(d))", fontsize=8.4)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, bbox_inches="tight")

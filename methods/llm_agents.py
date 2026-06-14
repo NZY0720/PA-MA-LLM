@@ -21,7 +21,7 @@ LLM_REPAIR_TEMPERATURE = 0.0
 MAX_LLM_ATTEMPTS = 3
 
 # Force direct connection: api.deepseek.com is reachable without a proxy, and
-# routing through a local proxy adds ~0.3-0.4s per request (see bench_proxy.py).
+# routing through a local proxy adds avoidable latency per request.
 _NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
